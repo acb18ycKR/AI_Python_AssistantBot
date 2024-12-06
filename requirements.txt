@@ -1,0 +1,4 @@
+slack-bolt==1.19.1
+slack==0.0.2
+slackclient==2.9.4
+# pip install -r requirements.txt
