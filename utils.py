@@ -1,60 +1,53 @@
 import os
-import numpy as np
-import openai  # openai 모듈을 임포트
+import json
+from langchain_community.vectorstores import FAISS
+from langchain_community.embeddings import OpenAIEmbeddings
+from langchain_community.llms import OpenAI
+from langchain.prompts import PromptTemplate
+from langchain.chains import RetrievalQA
 from dotenv import load_dotenv
 
+# Load environment variables
 load_dotenv()
-OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
+# Load glossary data from JSON file
+def load_glossary(file_path="data/combined_keyvalue_form.json"):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Glossary file not found: {file_path}")
+    with open(file_path, "r", encoding="utf-8") as f:
+        glossary = json.load(f)
+    return glossary
 
-def get_embedding(text, model='text-embedding-ada-002'):  # 모델 이름 수정
-    response = openai.Embedding.create(  # openai.Embedding.create()로 수정
-        input=text,
-        model=model,
-        api_key=OPENAI_API_KEY  # API 키를 직접 전달
+# Initialize LangChain QA Retrieval system
+def initialize_retrieval_qa():
+    # Define the embeddings model
+    embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+    
+    # Load the FAISS index
+    vectorstore = FAISS.load_local("data/faiss_index", embeddings)
+
+    # Define the prompt template
+    prompt = PromptTemplate(
+        template="You are a helpful assistant for Python learners. Provide clear, concise answers.\n\nQuestion: {question}\nAnswer:",
+        input_variables=["question"]
     )
-    return response['data'][0]['embedding']  # 수정된 응답 형식에 맞춰 접근
-
-
-def get_embeddings(text, model='text-embedding-ada-002'):  # 모델 이름 수정
-    response = openai.Embedding.create(  # openai.Embedding.create()로 수정
-        input=text,
-        model=model,
-        api_key=OPENAI_API_KEY  # API 키를 직접 전달
+    
+    # Initialize the RetrievalQA chain
+    qa = RetrievalQA.from_chain_type(
+        llm=OpenAI(model="text-davinci-003", temperature=0.0, openai_api_key=OPENAI_API_KEY),
+        retriever=vectorstore.as_retriever(),
+        chain_type_kwargs={"prompt": prompt}
     )
-    output = []
-    for item in response['data']:  # 응답 형식에 맞춰 수정
-        output.append(item['embedding'])
-    return output
+    return qa
 
+# Retrieve answer from glossary
+def get_glossary_definition(term):
+    qa = initialize_retrieval_qa()
+    response = qa.run(term)
+    return response
 
-def cosine_similarity(a, b):
-    return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
-
-
-def call_openai(prompt, temperature=0.0, model='gpt-3.5-turbo'):
-    response = openai.ChatCompletion.create(  # openai.ChatCompletion.create()로 수정
-        model=model,
-        messages=[{'role': 'user', 'content': prompt}],
-        temperature=temperature,
-        api_key=OPENAI_API_KEY  # API 키를 직접 전달
-    )
-    return response['choices'][0]['message']['content']
-
-
-def retrieve_context(question):
-    with open(r'C:\Users\RMARKET\Desktop\AI-SERVICE\assistant-question-answering\res\guidebook_full.txt', 'r', encoding='utf-8') as f:  # encoding='utf-8' 추가
-        contexts = f.read().split('\n\n')
-
-    # 질문과 문서 내용에 대한 임베딩 계산
-    question_embedding = get_embeddings([question], model='text-embedding-ada-002')[0]
-    context_embeddings = get_embeddings(contexts, model='text-embedding-ada-002')
-
-    # 유사도 계산
-    similarities = [cosine_similarity(question_embedding, context_embedding) for context_embedding in context_embeddings]
-
-    # 가장 유사한 컨텍스트 선택
-    most_relevant_index = np.argmax(similarities)
-    print(contexts[most_relevant_index])  # 가장 관련성 높은 텍스트 출력
-    return contexts[most_relevant_index]  # 가장 관련성 높은 텍스트 반환
-
+# Check environment variables
+def check_env():
+    if not OPENAI_API_KEY:
+        raise EnvironmentError("OPENAI_API_KEY is not set in your environment.")
