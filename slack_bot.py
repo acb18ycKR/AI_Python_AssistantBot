@@ -1,136 +1,561 @@
-import json
 import os
 from slack_sdk import WebClient
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 from openai import OpenAI
 from dotenv import load_dotenv
-from calendar_functions import generate_schedule
+from chat_functions import load_contents, initialize_files, save_chat_log, add_previous_data_to_messages
+from calendar_functions import delete_schedule, update_schedule,  view_progress, update_task_progress, schedule_all_reminders, save_schedule_to_json
+from calendar_functions import  format_schedule, schedule_specific_reminder
+import logging
+from create_calender import generate_schedule, parse_input
+
 
 # 환경 변수 로드
 load_dotenv()
 
-MESSAGES = []
+# 목차 로드
+try:
+    CONTENTS = load_contents()
+    CONTENTS_TEXT = "\n".join(CONTENTS)
+except FileNotFoundError:
+    CONTENTS = []
+    CONTENTS_TEXT = "목차 파일(contents.md)을 찾을 수 없습니다. 파일을 추가하고 다시 시도해주세요."
 
-# Slack 이벤트 API와 Web API 설정
+# Slack 및 GPT 설정
+MESSAGES = [
+    {
+        "role": "system",
+        "content": (
+            "너는 학습 플래너로서 사용자가 제공한 학습 목차에 기반하여 학습 일정을 생성, 조회, 수정, 리마인더 설정, 진행률 입력 및 조회를 그리고 용어 사전과 퀴즈를 지원하는 역할이야.  \n\n"
+            "첫 대화가 시작되면 아래처럼 안내를 해줘:\n"
+            "안녕하세요. 저는 학습 플래너 챗봇이에요🤖 \n\n"
+            "아래의 기능을 사용할 수 있어요:\n"
+            "- 일정 생성: '일정 생성'을 입력해주세요.\n"
+            "- 일정 조회: '일정 조회'를 입력해주세요.\n"
+            "- 일정 수정: '일정 수정'을 입력해주세요.\n"
+            "- 리마인더 설정: '리마인더 예약' 또는 '리마인더 예약 전체'를 입력해주세요.\n"
+            "- 진행률 입력: '진행률 입력'을 입력해주세요.\n"
+            "- 진행률 보기: '진행률 보기'를 입력해주세요.\n\n"
+            "- 용어 사전\n"
+            "- 퀴즈\n"
+            "반드시 아래 목차만 활용해서 답변해야 해:\n\n"
+            f"{CONTENTS_TEXT}\n\n"
+            "질문에 친절하고 명확하게 답변하고, 필요시 추가 정보를 요청하도록 해."
+        )
+    }
+]
+
 app = App(token=os.environ['SLACK_BOT_TOKEN'])
 slack_client = WebClient(os.environ['SLACK_BOT_TOKEN'])
 
-# GPT API 초기화
+# OpenAI 초기화
 api_key = os.getenv("OPENAI_API_KEY")
 os.environ["OPENAI_API_KEY"] = api_key
 client = OpenAI()
 
-
-def process_tool_call(tool_name, tool_input):
-    """도구 호출 처리 함수"""
-    if tool_name == "generate_schedule":
-        return generate_schedule(**tool_input)
+# 유저 입력 저장용 변수
+user_inputs = {}
 
 
 @app.event("app_mention")
 def handle_message_events(body, logger):
+
+    # 로깅 설정
+    logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+    logger = logging.getLogger()
+
+    global user_inputs, MESSAGES
+    channel = None  # channel 변수를 초기화
+
     try:
-        # 사용자가 보낸 메시지 추출
+        # Slack 이벤트 데이터 추출
         prompt = str(body["event"]["text"]).split(">")[1].strip()
-        print(f"\n{'='*50}\nUser Message: {prompt}\n{'='*50}")
+        channel = body["event"]["channel"]
+        thread_ts = body["event"]["event_ts"]
+        user_id = body["event"]["user"]
 
-        # 사용자 메시지 응답 중 '처리 중' 메시지 전송
-        slack_client.chat_postMessage(
-            channel=body["event"]["channel"],
-            thread_ts=body["event"]["event_ts"],
-            text="안녕하세요, 개인 비서 슬랙봇입니다! :robot_face: \n곧 전달 주신 문의사항 처리하겠습니다!"
-        )
+        # 항상 이전 대화와 일정 정보를 추가
+        add_previous_data_to_messages(MESSAGES)  # 최근 대화 추가
 
-        # 사용할 도구(tool) 정의
-        tools = [
-            {
-                "name": "generate_schedule",
-                "description": "학습 계획 생성 및 일정 등록",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "book_title": {
-                            "type": "string",
-                            "description": "책 제목 (예: '점프 투 파이썬')"
-                        },
-                        "days": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "학습 요일 (예: ['화', '목'])"
-                        },
-                        "time": {
-                            "type": "string",
-                            "description": "학습 시간 (예: '20:00')"
-                        },
-                        "weeks": {
-                            "type": "integer",
-                            "description": "학습 기간 (주 단위)"
-                        },
-                        "contents": {
-                            "type": "array",
-                            "items": {
-                                "type": "string"
-                            },
-                            "description": "책 목차 리스트"
-                        }
-                    },
-                    "required": ["book_title", "days", "time", "weeks", "contents"]
-                }
-            }
-        ]
-
-        # OpenAI API 호출
-        MESSAGES.append({"role": "user", "content": prompt})
-        response_from_gpt = client.chat.completions.create(
-            model="gpt-4",  # 최신 모델 사용
-            messages=MESSAGES,
-            functions=tools,
-            max_tokens=1024
-        )
-
-        print(f"\n초기 응답: {response_from_gpt.choices[0].message.content}")
-
-        if response_from_gpt.choices[0].finish_reason == "function_call":
-            function_call = response_from_gpt.choices[0].message.function_call
-            tool_name = function_call.name
-            tool_input = json.loads(function_call.arguments)
-
-            # 도구 실행
-            tool_result = process_tool_call(tool_name, tool_input)
-            print(f"도구 결과: {tool_result}")
-
-            # 도구 결과를 GPT에 전달하여 최종 응답 생성
-            final_response = client.chat.completions.create(
-                model="gpt-4",
-                messages=MESSAGES + [
-                    {"role": "assistant", "function_call": {"name": tool_name, "arguments": json.dumps(tool_input)}},
-                    {"role": "function", "name": tool_name, "content": json.dumps(tool_result)}
-                ],
-                max_tokens=4096
+        ##### 특정 명령어 처리
+        # Slack Bot 일정 생성 기능
+                ##### 일정 생성 요청 감지 #####
+   
+            # TODO : 일정 생성 찾아서 구현해두기
+          # 일정 생성 요청 감지
+        if "일정 생성" in prompt:
+            slack_client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=(
+                    "📅 학습 일정을 생성하려면 아래 정보를 모두 입력해주세요:\n"
+                    "- 학습 요일 (예: 월, 수)\n"
+                    "- 학습 시간 (예: 9:00 또는 오전 9시)\n"
+                    "- 학습 기간 (주 단위, 예: 10)\n\n"
+                    "입력 예시: 월, 수 10:00 10주"
+                )
             )
-            final_content = final_response.choices[0].message.content  # 최종 응답 내용
-        else:
-            final_content = response_from_gpt.choices[0].message.content
+            # 유저 입력 저장소 초기화
+            user_inputs[channel] = {"days": None, "time": None, "weeks": None}
+            return
 
-        # 최종 응답을 Slack 채널에 전송
-        slack_client.chat_postMessage(
-            channel=body["event"]["channel"],
-            thread_ts=body["event"]["event_ts"],
-            text=final_content
+        # 추가 입력을 받아 일정 생성
+        if channel in user_inputs:
+            user_data = user_inputs[channel]
+            try:
+                # 사용자 입력을 업데이트
+                days, time, weeks = parse_input(prompt)
+                user_data["days"] = days
+                user_data["time"] = time
+                user_data["weeks"] = weeks
+            except ValueError as e:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"⚠️ 입력 오류: {e}\n\n"
+                        "아래 형식을 확인하고 다시 입력해주세요:\n"
+                        "- 학습 요일 (예: 월, 수)\n"
+                        "- 학습 시간 (예: 9:00 또는 오전 9시)\n"
+                        "- 학습 기간 (주 단위, 예: 10)\n\n"
+                        "입력 예시: 월, 수 10:00 10주"
+                )
+                return
+
+            # 입력 데이터가 모두 수집되었는지 확인
+            if None in user_data.values():
+                missing = [key for key, value in user_data.items() if value is None]
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"⚠️ 부족한 입력 데이터: {', '.join(missing)}\n"
+                        "필요한 정보를 모두 입력해주세요."
+                )
+                return
+
+            # 일정 생성 및 저장
+            try:
+                schedule = generate_schedule(
+                    user_data["days"], 
+                    user_data["time"], 
+                    user_data["weeks"], 
+                    CONTENTS
+                )
+                save_schedule_to_json(schedule)
+
+                # 포매팅된 일정 응답
+                formatted_schedule = format_schedule(schedule)
+                formatted_response = (
+                    "📅 생성된 학습 일정입니다:\n"
+                    f"{formatted_schedule}\n\n"
+                    "다른 질문이나 요청이 있다면 말씀해주세요!"
+                )
+                MESSAGES.append({"role": "assistant", "content": formatted_response})
+
+                # Slack 응답
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=formatted_response
+                )
+
+                # 일정 생성 후 데이터 삭제
+                del user_inputs[channel]
+            except Exception as e:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"⚠️ 일정 생성 중 오류가 발생했습니다: {e}"
+                )
+
+
+
+        # 일정 수정 로직 구현
+        elif "일정 수정" in prompt:
+            try:
+                # 사용자 입력 파싱
+                parts = prompt.replace("일정 수정", "").strip().split(" ")
+
+                # 입력이 부족한 경우 안내 메시지 제공
+                if len(parts) < 4:
+                    gpt_response = (
+                        "일정을 수정하려면 아래 형식을 사용해 주세요:\n"
+                        "- **형식:** 일정 수정 [기존 날짜] [수정할 작업] [새 날짜] [새 시간]\n"
+                        "- **예:** 일정 수정 2024-12-09 01-5 파이썬 둘러보기 2024-12-11 10:00\n\n"
+                        "추가적인 질문이 있다면 언제든지 말씀해 주세요! 😊"
+                    )
+                    MESSAGES.append({"role": "assistant", "content": gpt_response})
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+                    return
+
+                # 0번째: 기존 날짜
+                date = parts[0]
+
+                # 1부터 마지막 두 번째까지: 학습 목차
+                updated_task = " ".join(parts[1:-2])
+
+                # 마지막 두 부분: 새 날짜와 새 시간
+                new_date = parts[-2]
+                new_time = parts[-1]
+
+                # 일정 수정 함수 호출
+                response = update_schedule(date.strip(), updated_task.strip(), new_date.strip(), new_time.strip())
+
+                # 수정 성공 여부에 따른 응답
+                if "이동되었습니다" in response or "추가되었습니다" in response:
+                    gpt_response = (
+                        f"✅ 일정이 성공적으로 수정되었습니다!\n"
+                        f"- **기존 날짜:** {date}\n"
+                        f"- **수정된 작업:** {updated_task}\n"
+                        f"- **새로운 날짜:** {new_date}\n"
+                        f"- **새로운 시간:** {new_time}\n\n"
+                        f"결과: {response}"
+                    )
+                else:
+                    gpt_response = (
+                        f"⚠️ 일정 수정 중 문제가 발생했습니다: {response}\n"
+                        f"입력 형식이 올바른지 확인하고 다시 시도해 주세요.\n"
+                        "- **형식:** 일정 수정 [기존 날짜] [수정할 작업] [새 날짜] [새 시간]"
+                    )
+
+                # GPT 응답 생성 및 Slack 메시지 전송
+                MESSAGES.append({"role": "assistant", "content": gpt_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+
+            except ValueError as e:
+                # 입력 오류가 발생했을 때 일정 수정 안내 메시지 제공
+                gpt_response = (
+                    f"⚠️ 입력 오류가 발생했습니다: {str(e)}\n\n"
+                    "일정을 수정하려면 아래 형식을 사용해 주세요:\n"
+                    "- **형식:** 일정 수정 [기존 날짜] [수정할 작업] [새 날짜] [새 시간]\n"
+                    "- **예:** 일정 수정 2024-12-09 01-5 파이썬 둘러보기 2024-12-11 10:00\n\n"
+                    "추가적인 질문이 있다면 언제든지 말씀해 주세요! 😊"
+                )
+                MESSAGES.append({"role": "assistant", "content": gpt_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+            return
+
+
+        # Slack 명령어 처리
+        # 일정 삭제 Slack 명령어 처리
+        elif "일정 삭제" in prompt:
+            try:
+                # 사용자 입력 파싱
+                parts = prompt.replace("일정 삭제", "").strip().split(" ")
+
+                if not parts or (len(parts) == 1 and parts[0] == ""):
+                    gpt_response = (
+                        "삭제할 일정을 입력해 주세요:\n"
+                        "- **형식 1:** 일정 삭제 [날짜] (해당 날짜 전체 삭제)\n"
+                        "- **형식 2:** 일정 삭제 [날짜] [삭제할 작업] (특정 작업만 삭제)\n"
+                        "- **형식 3:** 일정 전체 삭제\n\n"
+                        "예:\n"
+                        "- 일정 삭제 2024-12-10\n"
+                        "- 일정 삭제 2024-12-10 01-6 파이썬 둘러보기\n"
+                        "- 일정 전체 삭제"
+                    )
+                    MESSAGES.append({"role": "assistant", "content": gpt_response})
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+                    return
+
+                # "전체 삭제" 처리
+                if "전체 삭제" in parts:
+                    gpt_response = (
+                        "⚠️ 모든 일정을 삭제하시겠습니까?\n"
+                        "이 작업은 되돌릴 수 없습니다.\n"
+                        "삭제를 원하시면 '예' 또는 '아니오'로 응답해 주세요."
+                    )
+                    MESSAGES.append({"role": "assistant", "content": gpt_response})
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+
+                    # 실제 삭제 확인 로직
+                    confirmation = "예"  # 예제에서는 자동으로 '예' 처리. 실제 Slack에서는 사용자 응답을 받아 처리.
+                    if confirmation.lower() == "예":
+                        response = delete_schedule(delete_all=True)
+                    else:
+                        response = "❌ 전체 일정 삭제가 취소되었습니다."
+
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
+                    return
+
+                # 특정 날짜와 작업 삭제 처리
+                date = parts[0]
+                task = " ".join(parts[1:]) if len(parts) > 1 else None
+
+                if not date:
+                    gpt_response = (
+                        "⚠️ 삭제할 날짜를 입력해 주세요.\n"
+                        "- **예:** 일정 삭제 2024-12-10"
+                    )
+                    MESSAGES.append({"role": "assistant", "content": gpt_response})
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+                    return
+
+                # 일정 삭제 호출
+                response = delete_schedule(date.strip(), task.strip() if task else None)
+
+                # 결과 메시지 처리
+                gpt_response = f"✅ {response}" if "삭제되었습니다" in response else f"⚠️ {response}"
+                MESSAGES.append({"role": "assistant", "content": gpt_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_response)
+
+            except ValueError:
+                # 잘못된 입력 처리
+                gpt_error_response = (
+                    "⚠️ 입력 형식 오류가 발생했습니다:\n"
+                    "- **형식 1:** 일정 삭제 [날짜] (해당 날짜 전체 삭제)\n"
+                    "- **형식 2:** 일정 삭제 [날짜] [삭제할 작업] (특정 작업만 삭제)\n\n"
+                    "예:\n"
+                    "- 일정 삭제 2024-12-10\n"
+                    "- 일정 삭제 2024-12-10 01-6 파이썬 둘러보기\n"
+                )
+                MESSAGES.append({"role": "assistant", "content": gpt_error_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_error_response)
+            return
+
+        elif "일정 전체 삭제" in prompt:
+            try:
+                # 전체 삭제 확인 메시지와 버튼 전송
+                gpt_response = {
+                    "blocks": [
+                        {
+                            "type": "section",
+                            "text": {
+                                "type": "mrkdwn",
+                                "text": "⚠️ 모든 일정을 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다."
+                            }
+                        },
+                        {
+                            "type": "actions",
+                            "elements": [
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "예"},
+                                    "style": "danger",
+                                    "action_id": "confirm_delete_all"  # 여기에서 action_id 설정
+                                },
+                                {
+                                    "type": "button",
+                                    "text": {"type": "plain_text", "text": "아니오"},
+                                    "style": "primary",
+                                    "action_id": "cancel_delete_all"  # 여기에서 action_id 설정
+                                }
+                            ]
+                        }
+                    ]
+                }
+
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, blocks=gpt_response["blocks"], text="전체 일정 삭제 확인")
+            except Exception as e:
+                gpt_error_response = f"⚠️ 오류가 발생했습니다: {str(e)}"
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=gpt_error_response)
+            return
+
+        elif "리마인더" in prompt:
+            if "리마인더 예약 전체" in prompt:
+                try:
+                    parts = prompt.replace("리마인더 예약 전체", "").strip()
+                    hours_before = int(parts) if parts else 1  # 기본값 1시간
+                    schedule_all_reminders(channel, slack_client, hours_before)
+                    slack_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"모든 일정에 대해 {hours_before}시간 전에 리마인더가 예약되었습니다."
+                    )
+                except ValueError:
+                    slack_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text="⚠️ 올바른 시간을 입력하세요. 예: `리마인더 예약 전체 3`"
+                    )
+            elif "리마인더 예약" in prompt:
+                try:
+                    parts = prompt.replace("리마인더 예약", "").strip().split()
+                    target_date = parts[0]
+                    hours_before = int(parts[1]) if len(parts) > 1 else 1  # 기본값 1시간
+                    schedule_specific_reminder(channel, slack_client, target_date, hours_before)
+                    slack_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text=f"{target_date} 일정에 대해 {hours_before}시간 전에 리마인더가 예약되었습니다."
+                    )
+                except (IndexError, ValueError):
+                    slack_client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text="⚠️ 올바른 형식을 입력하세요. 예: `리마인더 예약 2024-12-18 3`"
+                    )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=(
+                        "리마인더 기능을 사용할 수 있습니다:\n"
+                        "- 특정 날짜 리마인더 예약: `리마인더 예약 [날짜] [시간 전]`\n"
+                        "  예: `리마인더 예약 2024-12-18 3`\n"
+                        "- 전체 일정 리마인더 예약: `리마인더 예약 전체 [시간 전]`\n"
+                        "  예: `리마인더 예약 전체 3`"
+                    )
+                )
+
+
+        elif "진행률 입력" in prompt:
+            # 사용자가 올바른 입력을 제공했는지 확인
+            try:
+                parts = prompt.replace("진행률 입력", "").strip().split(" ", 2)
+                if len(parts) < 3:
+                    raise ValueError("올바른 입력 형식을 제공해야 합니다.")
+                date, task_name, progress = parts[0], parts[1], int(parts[2])
+
+                # 진행률 업데이트 처리
+                response = update_task_progress(date, task_name, progress)
+                MESSAGES.append({"role": "assistant", "content": response})
+
+                # GPT가 응답하도록 설정
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=response)
+
+            except (ValueError, IndexError):
+                # 올바른 형식이 아닌 경우 안내 메시지 생성
+                MESSAGES.append({"role": "user", "content": prompt})
+                assistant_response = (
+                    "📝 진행률을 입력하려면 아래 형식을 사용하세요:\n"
+                    "- **형식:** 진행률 입력 [날짜] [학습 목차] [진행률(0~100)]\n"
+                    "- **예:** 진행률 입력 2024-12-18 01-5 파이썬 둘러보기 50\n\n"
+                    "정확한 정보를 입력해 주시면 기록하겠습니다!"
+                )
+                MESSAGES.append({"role": "assistant", "content": assistant_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_response)
+
+            return
+        
+
+        elif "진행률 보기" in prompt:
+            # 진행률 보기 요청
+            try:
+                if "진행률 보기" == prompt.strip():  # 단순히 '진행률 보기'만 입력된 경우
+                    progress = view_progress()
+                    MESSAGES.append({"role": "assistant", "content": progress})
+                    slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=progress)
+                else:
+                    raise ValueError("진행률 보기 명령 형식이 올바르지 않습니다.")
+            except ValueError:
+                # 올바른 형식 안내
+                MESSAGES.append({"role": "user", "content": prompt})
+                assistant_response = (
+                    "📊 진행률을 보시려면 아래 명령어를 사용하세요:\n"
+                    "- **형식:** 진행률 보기\n"
+                    "이 명령어로 전체 평균 진행률과 오늘 날짜의 진행률을 확인할 수 있습니다!"
+                )
+                MESSAGES.append({"role": "assistant", "content": assistant_response})
+                slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_response)
+
+            return
+
+
+
+        if "용어 사전" in prompt:
+            MESSAGES.append({"role": "user", "content": prompt})
+            
+            # GPT로부터 응답 생성
+            response = client.chat.completions.create(
+                model='gpt-4o',
+                messages=MESSAGES
+            )
+            assistant_reply = response.choices[0].message.content
+            
+            # GPT 응답을 MESSAGES에 추가
+            MESSAGES.append({"role": "assistant", "content": assistant_reply})
+            
+            # Slack에 GPT 응답 전송
+            slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_reply)
+            return
+
+        if "퀴즈" in prompt:
+            MESSAGES.append({"role": "user", "content": prompt})
+            
+            # GPT로부터 응답 생성
+            response = client.chat.completions.create(
+                model='gpt-4o',
+                messages=MESSAGES
+            )
+            assistant_reply = response.choices[0].message.content
+            
+            # GPT 응답을 MESSAGES에 추가
+            MESSAGES.append({"role": "assistant", "content": assistant_reply})
+            
+            # Slack에 GPT 응답 전송
+            slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_reply)
+            return
+
+
+        # 기본 메시지 처리 (GPT 활용)
+        save_chat_log(user_id, prompt, role="user")
+        MESSAGES.append({"role": "user", "content": prompt})
+
+        response = client.chat.completions.create(
+            model='gpt-4o',
+            messages=MESSAGES
         )
 
+        assistant_reply = response.choices[0].message.content
+        MESSAGES.append({"role": "assistant", "content": assistant_reply})
+
+        save_chat_log("GPT", assistant_reply, role="assistant")
+
+        slack_client.chat_postMessage(
+            channel=channel,
+            thread_ts=thread_ts,
+            text=assistant_reply
+        )
 
     except Exception as e:
         logger.error(f"Error handling message: {e}")
-        slack_client.chat_postMessage(
-            channel=body["event"]["channel"],
-            thread_ts=body["event"]["event_ts"],
-            text=f"오류가 발생했습니다: {str(e)}"
+        if channel:
+            slack_client.chat_postMessage(
+                channel=channel,
+                thread_ts=thread_ts,
+                text=f"오류가 발생했습니다: {str(e)}"
+            )
+
+
+@app.action("confirm_delete_all")
+def handle_confirm_delete_all(ack, body, client, logger):
+    """
+    '예' 버튼 클릭 이벤트를 처리하여 모든 일정을 삭제합니다.
+    """
+    ack()  # Slack에 응답
+    try:
+        response = delete_schedule(delete_all=True)  # 모든 일정 삭제
+        client.chat_postMessage(
+            channel=body["channel"]["id"],
+            text=f"✅ 모든 일정이 삭제되었습니다."
+        )
+    except Exception as e:
+        logger.error(f"전체 삭제 처리 중 오류: {e}")
+        client.chat_postMessage(
+            channel=body["channel"]["id"],
+            text=f"⚠️ 오류가 발생했습니다: {str(e)}"
         )
 
 
+@app.action("cancel_delete_all")
+def handle_cancel_delete_all(ack, body, client):
+    """
+    '아니오' 버튼 클릭 이벤트를 처리하여 삭제 작업을 취소합니다.
+    """
+    ack()  # Slack에 응답
+    client.chat_postMessage(
+        channel=body["channel"]["id"],
+        text="❌ 전체 일정 삭제가 취소되었습니다."
+    )
+
+@app.action("confirm_delete_all")
+def handle_confirm_delete_all(ack, body, client, logger):
+    ack()  # Slack에 응답
+    logger.info(f"버튼 클릭 이벤트 데이터: {body}")  # 로그 출력
+
+
+
 if __name__ == "__main__":
+    initialize_files()
     SocketModeHandler(app, os.environ['SLACK_APP_TOKEN']).start()
