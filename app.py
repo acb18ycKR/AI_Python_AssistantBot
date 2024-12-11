@@ -7,7 +7,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from chat_functions import load_contents, initialize_files, save_chat_log, add_previous_data_to_messages
 from calendar_functions import delete_schedule, update_schedule,  view_progress, update_task_progress, schedule_all_reminders, save_schedule_to_json
-from calendar_functions import  format_schedule, schedule_specific_reminder
+from calendar_functions import  format_schedule, schedule_specific_reminder, load_schedule_from_json
 from create_calender import generate_schedule, parse_input
 # from rag_functions import initialize_rag_system
 from raptor_rag_functions import generate_raptor_rag_answer, initialize_raptor_rag_system
@@ -21,7 +21,7 @@ try:
 except FileNotFoundError:
     CONTENTS = []
     CONTENTS_TEXT = "목차 파일(contents.md)을 찾을 수 없습니다. 파일을 추가하고 다시 시도해주세요."
-
+MAX_MESSAGE_HISTORY = 10  # 메시지 히스토리를 10개로 제한
 # Slack 및 GPT 설정
 MESSAGES = [
     {
@@ -45,6 +45,21 @@ MESSAGES = [
         )
     }
 ]
+
+def manage_message_history(messages):
+    """메시지 히스토리를 제한하여 토큰 초과를 방지."""
+    if len(messages) > MAX_MESSAGE_HISTORY:
+        messages = messages[-MAX_MESSAGE_HISTORY:]  # 최근 MAX_MESSAGE_HISTORY 개 메시지만 유지
+    return messages
+
+def summarize_messages(messages):
+    """기존 메시지 내용을 요약하여 시스템 메시지로 추가."""
+    if len(messages) > MAX_MESSAGE_HISTORY:
+        summary = "사용자와의 이전 대화 요약: "
+        summary += " ".join([m["content"] for m in messages[:-MAX_MESSAGE_HISTORY]])
+        messages = messages[-MAX_MESSAGE_HISTORY:]
+        messages.insert(0, {"role": "system", "content": summary})
+    return messages
 
 app = App(token=os.environ['SLACK_BOT_TOKEN'])
 slack_client = WebClient(os.environ['SLACK_BOT_TOKEN'])
@@ -83,8 +98,11 @@ def handle_message_events(body, logger):
         thread_ts = body["event"]["event_ts"]
         user_id = body["event"]["user"]
 
+        # # 항상 이전 대화와 일정 정보를 추가
+        # add_previous_data_to_messages(MESSAGES)  # 최근 대화 추가
+
         # 항상 이전 대화와 일정 정보를 추가
-        add_previous_data_to_messages(MESSAGES)  # 최근 대화 추가
+        MESSAGES = manage_message_history(MESSAGES)
 
         ##### 특정 명령어 처리
         # Slack Bot 일정 생성 기능
@@ -175,7 +193,23 @@ def handle_message_events(body, logger):
                     thread_ts=thread_ts,
                     text=f"⚠️ 일정 생성 중 오류가 발생했습니다: {e}"
                 )
-
+        # 일정 조회 요청 감지
+        elif "일정 조회" in prompt or "주차 일정" in prompt:
+            schedule = load_schedule_from_json()  # 스케줄 데이터를 파일에서 읽어옴
+            if schedule:
+                formatted_schedule = format_schedule(schedule)  # 포매팅된 스케줄 데이터
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text=f"📅 저장된 학습 일정:\n{formatted_schedule}"
+                )
+            else:
+                slack_client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="저장된 일정이 없습니다. 먼저 일정을 생성해주세요."
+                )
+            return
 
 
         # 일정 수정 로직 구현
@@ -478,7 +512,7 @@ def handle_message_events(body, logger):
 
             try:
                 # RAG 시스템 초기화
-                RAG_PDF_PATH = r"C:\\Users\\RMARKET\\workspace\\assistntbot\\AI_Python_AssistantBot\\data\\converted_data_with_metadata.pdf"
+                RAG_PDF_PATH = r"C:\Users\RMARKET\workspace\assistntbot\AI_Python_AssistantBot\data\converted_data_with_metadata.pdf"
                 rag_chain = initialize_raptor_rag_system(RAG_PDF_PATH)
             except Exception as e:
                 slack_client.chat_postMessage(
@@ -664,6 +698,7 @@ def handle_message_events(body, logger):
                 thread_ts=thread_ts,
                 text=f"오류가 발생했습니다: {str(e)}"
             )
+
 
 
 @app.action("confirm_delete_all")
