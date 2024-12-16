@@ -203,8 +203,7 @@ def send_reminder_to_slack(channel, date):
             return f"{date}의 일정 리마인더가 슬랙으로 전송되었습니다."
     return f"{date}에 해당하는 일정이 없습니다."
 
-# TODO : 진행률에 따라서 리마인드 해주기
-# TODO : 진행률을 말하면서 독려 해주기
+# 진행률 보기
 def view_progress():
     """전체 일정의 평균 진행률과 오늘 진행률을 계산합니다."""
     schedule = load_schedule_from_json()
@@ -254,7 +253,6 @@ def view_progress():
         f"오늘({today})의 진행률은 {today_progress:.2f}%입니다."
     )
 
-
 def update_task_progress(date, task_name):
     """특정 날짜의 특정 작업에 대해 진행률을 업데이트합니다."""
     schedule = load_schedule_from_json()
@@ -271,7 +269,8 @@ def update_task_progress(date, task_name):
             # 특정 작업의 진행률 업데이트
             updated_tasks = []
             for task in tasks:
-                if task == task_name:
+                # 작업 이름 비교 (공백 제거 및 대소문자 무시)
+                if task.strip().lower() == task_name.strip().lower():
                     updated_tasks.append(f"{task} (완료)")
                     completed_tasks += 1
                     found = True
@@ -293,6 +292,45 @@ def update_task_progress(date, task_name):
     save_schedule_to_json(schedule)
     print(f"{date}의 '{task_name}' 학습 완료. 전체 학습률: {overall_progress:.2f}%")
     return f"{date}의 '{task_name}' 학습을 완료했습니다..\n현재 전체 학습 진행률은 {overall_progress:.2f}%입니다."
+
+# def update_task_progress(date, task_name):
+#     """특정 날짜의 특정 작업에 대해 진행률을 업데이트합니다."""
+#     schedule = load_schedule_from_json()
+#     found = False  # 해당 작업이 존재하는지 여부
+#     completed_tasks = 0
+#     total_tasks = 0
+
+#     for event in schedule:
+#         if event["date"] == date:
+#             # '학습 계획: ' 제거 및 작업 단위로 분리
+#             tasks = event["summary"].replace("학습 계획: ", "").split(", ")
+#             total_tasks = len(tasks)
+
+#             # 특정 작업의 진행률 업데이트
+#             updated_tasks = []
+#             for task in tasks:
+#                 if task == task_name:
+#                     updated_tasks.append(f"{task} (완료)")
+#                     completed_tasks += 1
+#                     found = True
+#                 else:
+#                     if "(완료)" in task:
+#                         completed_tasks += 1
+#                     updated_tasks.append(task)
+
+#             # 수정된 summary를 다시 문자열로 저장
+#             event["summary"] = "학습 계획: " + ", ".join(updated_tasks)
+
+#     if not found:
+#         return f"{date}에 '{task_name}' 작업이 없습니다."
+
+#     # 전체 진행률 계산
+#     overall_progress = (completed_tasks / total_tasks) * 100 if total_tasks > 0 else 0
+#     event["progress"] = overall_progress
+
+#     save_schedule_to_json(schedule)
+
+#     return f"{date}의 '{task_name}' 학습을 완료했습니다.\n현재 전체 학습 진행률은 {overall_progress:.2f}%입니다."
 
 
 # 스케줄러 초기화

@@ -21,7 +21,7 @@ embd = OpenAIEmbeddings(model="text-embedding-ada-002")
 model = ChatOpenAI(model="gpt-4o", temperature=0)
 
 # PDF 로드 및 텍스트 분할
-def load_and_split_pdf(pdf_path, chunk_size=1000, chunk_overlap=100):
+def load_and_split_pdf(pdf_path, chunk_size=1100, chunk_overlap=100):
     """
     PDF 문서를 로드하고 텍스트를 분할합니다.
     """
@@ -74,7 +74,8 @@ def create_vectorstore(documents):
     try:
         vectorstore = FAISS.from_documents(documents=documents, embedding=embd)
         if os.path.exists(DB_INDEX):
-            local_index = FAISS.load_local(DB_INDEX, embd)
+            # Pickle 역직렬화를 허용
+            local_index = FAISS.load_local(DB_INDEX, embd, allow_dangerous_deserialization=True)
             local_index.merge_from(vectorstore)
             local_index.save_local(DB_INDEX)
         else:
@@ -83,13 +84,11 @@ def create_vectorstore(documents):
     except Exception as e:
         raise ValueError(f"벡터스토어 생성 중 오류가 발생했습니다: {str(e)}")
 
+
 # RAG Chain Initialization
 def create_raptor_rag_chain(vectorstore):
     prompt = ChatPromptTemplate.from_template(
-        """You are an expert at summarizing complex information. Use the given context to answer the question.
-        Context: {context}
-        Question: {question}
-        Answer:"""
+        """너는 파이썬 용어 사전과 퀴즈 풀기 기능이 있는 AI 학습 비서 챗봇이야. """
     )
     return {
         "context": vectorstore | (lambda docs: "\n\n".join([doc.page_content for doc in docs])),
@@ -122,62 +121,3 @@ def generate_raptor_rag_answer(question, rag_chain):
         return rag_chain.invoke(question)
     except Exception as e:
         return f"Error generating answer: {str(e)}" 
-    
-# RAG 성능 테스트 함수
-def ragas_test(question, answer, retrieved_context):
-    """
-    질문, 답변, 검색된 컨텍스트를 기반으로 성능 평가를 실행합니다.
-    Args:
-        question (str): 질문
-        answer (str): 모델의 답변
-        retrieved_context (list): 검색된 컨텍스트
-    Returns:
-        dict: 평가 결과
-    """
-    # 데이터셋 생성
-    dataset = [{
-        "question": question,
-        "answer": answer,
-        "retrieved_context": "\n\n".join(retrieved_context)
-    }]
-
-    # 평가 지표 정의
-    def answer_relevancy(dataset):
-        relevancies = [1 if d["answer"] in d["retrieved_context"] else 0 for d in dataset]
-        return sum(relevancies) / len(relevancies)
-
-    def faithfulness(dataset):
-        faithfulness_scores = [1 if d["answer"] == d["retrieved_context"] else 0 for d in dataset]
-        return sum(faithfulness_scores) / len(faithfulness_scores)
-
-    def context_recall(dataset):
-        recalls = [1 if d["answer"] in d["retrieved_context"] else 0 for d in dataset]
-        return sum(recalls) / len(recalls)
-
-    def context_precision(dataset):
-        precisions = [1 if d["answer"] in d["retrieved_context"] else 0 for d in dataset]
-        return sum(precisions) / len(precisions)
-
-    # 평가 실행
-    metrics = [
-        answer_relevancy,
-        faithfulness,
-        context_recall,
-        context_precision
-    ]
-    results = {metric.__name__: metric(dataset) for metric in metrics}
-    return results
-
-# 테스트 실행
-if __name__ == "__main__":
-    # 예시 데이터
-    question = "파이썬의 for문의 정의를 알려줘"
-    answer = "for문은 반복문으로, 리스트나 튜플 등의 항목을 반복적으로 실행할 수 있게 한다."
-    retrieved_context = [
-        "for문은 반복문으로, 리스트나 튜플 등의 항목을 반복적으로 실행할 수 있게 한다.",
-        "파이썬의 반복문에는 for문과 while문이 있다."
-    ]
-    
-    # RAG 성능 평가 실행
-    result = ragas_test(question, answer, retrieved_context)
-    print("RAG 성능 평가 결과:", result)

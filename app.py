@@ -27,7 +27,8 @@ MESSAGES = [
     {
         "role": "system",
         "content": (
-            "너는 학습 플래너로서 사용자가 제공한 학습 목차에 기반하여 학습 일정을 생성, 조회, 수정, 리마인더 설정, 진행률 입력 및 조회를 그리고 용어 사전과 퀴즈를 지원하는 역할이야.  \n\n"
+            "너는 학습 플래너로서 사용자가 제공한 학습 목차에 기반하여 학습 일정을 생성, 조회, 수정," 
+            "리마인더 설정, 진행률 입력 및 조회를 그리고 용어 사전과 퀴즈를 지원하는 역할이야.  \n\n"
             "첫 대화가 시작되면 아래처럼 안내를 해줘:\n"
             "안녕하세요. 저는 학습 플래너 챗봇이에요🤖 \n\n"
             "아래의 기능을 사용할 수 있어요:\n"
@@ -36,7 +37,7 @@ MESSAGES = [
             "- 일정 수정: '일정 수정'을 입력해주세요.\n"
             "- 리마인더 설정: '리마인더 예약' 또는 '리마인더 예약 전체'를 입력해주세요.\n"
             "- 진행률 입력: '진행률 입력'을 입력해주세요.\n"
-            "- 진행률 보기: '진행률 보기'를 입력해주세요.\n\n"
+            "- 진행률 보기: '진행률 보기'를 입력해주세요.\n"
             "- 용어 사전\n"
             "- 퀴즈\n"
             "반드시 아래 목차만 활용해서 답변해야 해:\n\n"
@@ -178,39 +179,39 @@ def handle_message_events(body, logger):
                 )
                 MESSAGES.append({"role": "assistant", "content": formatted_response})
 
-                # Slack 응답
-                slack_client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text=formatted_response
-                )
+                # # Slack 응답
+                # slack_client.chat_postMessage(
+                #     channel=channel,
+                #     thread_ts=thread_ts,
+                #     text=formatted_response
+                # )
 
                 # 일정 생성 후 데이터 삭제
                 del user_inputs[channel]
             except Exception as e:
                 slack_client.chat_postMessage(
                     channel=channel,
-                    thread_ts=thread_ts,
+                    thread_ts=thread_ts,    
                     text=f"⚠️ 일정 생성 중 오류가 발생했습니다: {e}"
                 )
-        # 일정 조회 요청 감지
-        elif "일정 조회" in prompt or "주차 일정" in prompt:
-            schedule = load_schedule_from_json()  # 스케줄 데이터를 파일에서 읽어옴
-            if schedule:
-                formatted_schedule = format_schedule(schedule)  # 포매팅된 스케줄 데이터
+        # 일정 조회
+        elif "일정 조회" in prompt:
+            schedule = load_schedule_from_json()
+            if not schedule:
                 slack_client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread_ts,
-                    text=f"📅 저장된 학습 일정:\n{formatted_schedule}"
+                    text="저장된 일정이 없습니다. 새 일정을 생성해보세요!"
                 )
             else:
+                formatted_schedule = "\n".join(
+                    f"📅 {event['date']} {event['summary']}" for event in schedule
+                )
                 slack_client.chat_postMessage(
                     channel=channel,
                     thread_ts=thread_ts,
-                    text="저장된 일정이 없습니다. 먼저 일정을 생성해주세요."
-                )
-            return
-
+                    text=f"저장된 일정:\n{formatted_schedule}"
+        )
 
         # 일정 수정 로직 구현
         elif "일정 수정" in prompt:
@@ -441,16 +442,28 @@ def handle_message_events(body, logger):
                 )
 
 
+        
         elif "진행률 입력" in prompt:
             # 사용자가 올바른 입력을 제공했는지 확인
             try:
-                parts = prompt.replace("진행률 입력", "").strip().split(" ", 2)
-                if len(parts) < 3:
+                # '진행률 입력' 제거 후 분리
+                parts = prompt.replace("진행률 입력", "").strip().rsplit(" ", 1)
+                if len(parts) < 2:
                     raise ValueError("올바른 입력 형식을 제공해야 합니다.")
-                date, task_name, progress = parts[0], parts[1], int(parts[2])
+
+                date_and_task = parts[0]  # 날짜와 작업 이름 포함 부분
+                status = parts[-1]  # 마지막은 상태 (예: 완료)
+
+                # 날짜와 작업 이름 분리
+                date, task_name = date_and_task.split(" ", 1)
+
+                # Debugging: print extracted values
+                print(f"Extracted date: {date}")
+                print(f"Extracted task_name: {task_name}")
+                print(f"Extracted status: {status}")
 
                 # 진행률 업데이트 처리
-                response = update_task_progress(date, task_name, progress)
+                response = update_task_progress(date, task_name)
                 MESSAGES.append({"role": "assistant", "content": response})
 
                 # GPT가 응답하도록 설정
@@ -461,14 +474,17 @@ def handle_message_events(body, logger):
                 MESSAGES.append({"role": "user", "content": prompt})
                 assistant_response = (
                     "📝 진행률을 입력하려면 아래 형식을 사용하세요:\n"
-                    "- **형식:** 진행률 입력 [날짜] [학습 목차] [진행률(0~100)]\n"
-                    "- **예:** 진행률 입력 2024-12-18 01-5 파이썬 둘러보기 50\n\n"
+                    "- **형식:** 진행률 입력 [날짜] [학습 목차] [완료]\n"
+                    "- **예:** 진행률 입력 2024-12-18 01-5 파이썬 둘러보기 완료\n\n"
                     "정확한 정보를 입력해 주시면 기록하겠습니다!"
                 )
                 MESSAGES.append({"role": "assistant", "content": assistant_response})
                 slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_response)
 
             return
+
+
+
         
 
         elif "진행률 보기" in prompt:
@@ -492,6 +508,7 @@ def handle_message_events(body, logger):
                 slack_client.chat_postMessage(channel=channel, thread_ts=thread_ts, text=assistant_response)
 
             return
+
         
         # raptor 버전
         if "용어 사전" in prompt:
@@ -738,6 +755,26 @@ def handle_confirm_delete_all(ack, body, client, logger):
     logger.info(f"버튼 클릭 이벤트 데이터: {body}")  # 로그 출력
 
 
+# Helper 함수 (예시 구현)
+def get_today_date():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m-%d")
+
+def get_yesterday_date():
+    from datetime import datetime, timedelta
+    return (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+def format_weekly_schedule(schedule):
+    # 주간 일정 데이터를 보기 좋게 포매팅하는 함수 구현 (예시)
+    return "\n".join([f"{date}: {tasks}" for date, tasks in schedule.items() if is_this_week(date)])
+
+def is_this_week(date):
+    from datetime import datetime, timedelta
+    today = datetime.now()
+    start_of_week = today - timedelta(days=today.weekday())
+    end_of_week = start_of_week + timedelta(days=6)
+    date_obj = datetime.strptime(date, "%Y-%m-%d")
+    return start_of_week <= date_obj <= end_of_week
 
 if __name__ == "__main__":
     initialize_files()
