@@ -7,7 +7,7 @@ from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
 
 # PDF 로드 및 텍스트 분할
-def load_and_split_pdf(pdf_path, chunk_size=1000, chunk_overlap=100):
+def load_and_split_pdf(pdf_path, chunk_size=1100, chunk_overlap=100):
     try:
         loader = PDFPlumberLoader(pdf_path)
         docs = loader.load()
